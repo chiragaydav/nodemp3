@@ -1,56 +1,69 @@
 const express = require('express');
+const cors = require('cors');
 const ytdl = require('ytdl-core');
 const ffmpeg = require('fluent-ffmpeg');
-const fs = require('fs');
+const bodyParser = require('body-parser');
+
 const app = express();
-const port = 3000;
+const PORT = process.env.PORT || 3000; // Use the PORT environment variable if available, or default to 3000
 
-app.get('/convert', async (req, res) => {
-    try {
-        const videoUrl = req.query.url;
-        if (!ytdl.validateURL(videoUrl)) {
-            return res.status(400).send('Invalid URL');
-        }
+app.use(cors({
+  origin: 'https://youtubetomp3hub.com' // Update CORS settings for your frontend domain
+}));
 
-        const videoInfo = await ytdl.getInfo(videoUrl);
-        const videoTitle = videoInfo.videoDetails.title;
-        const sanitizedVideoTitle = videoTitle.replace(/[^a-zA-Z0-9_-]/g, '');
-        const outputPath = `./${sanitizedVideoTitle}.mp3`;
+app.use(bodyParser.json());
 
-        const videoStream = ytdl(videoUrl, { quality: 'highestaudio', filter: 'audioonly' });
+const videoTitles = {};
 
-        const ffmpegProcess = ffmpeg(videoStream)
-            .audioBitrate(128)
-            .save(outputPath)
-            .on('end', () => {
-                // Once the conversion is complete, initiate the download
-                res.download(outputPath, (err) => {
-                    if (err) {
-                        console.error(err);
-                        res.status(500).send('An error occurred while sending the file');
-                    }
-                    // Delete the file after sending it
-                    fs.unlink(outputPath, (unlinkErr) => {
-                        if (unlinkErr) {
-                            console.error('Error deleting the file:', unlinkErr);
-                        }
-                    });
-                });
-            })
-            .on('error', (err) => {
-                console.error(err);
-                res.status(500).send('An error occurred during conversion');
-                // Delete the file if an error occurs
-                if (fs.existsSync(outputPath)) {
-                    fs.unlinkSync(outputPath);
-                }
-            });
-    } catch (error) {
-        console.error(error);
-        res.status(500).send('An error occurred during conversion');
-    }
+app.post('/fetch_info', async (req, res) => {
+  const { video_id } = req.body;
+  if (!video_id) {
+    return res.status(400).json({ error: 'No video ID provided.' });
+  }
+
+  try {
+    const info = await ytdl.getInfo(video_id);
+    const title = info.videoDetails.title;
+    const normalizedTitle = title.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, "_");
+    videoTitles[video_id] = `${normalizedTitle}.mp3`;
+
+    const downloadLink = `${req.protocol}://${req.get('host')}/download_mp3?video_id=${video_id}`;
+
+    const audioInfo = {
+      title: title,
+      thumbnail_url: info.videoDetails.thumbnails[0].url,
+      downloadLink: downloadLink
+    };
+
+    res.json(audioInfo);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error fetching video info.' });
+  }
 });
 
-app.listen(port, () => {
-    console.log(`Server is listening at http://localhost:${port}`);
+app.get('/download_mp3', (req, res) => {
+  const { video_id } = req.query;
+  if (!video_id) {
+    return res.status(400).send('No video ID provided.');
+  }
+  
+  const title = videoTitles[video_id] || 'default_title.mp3';
+
+  res.setHeader('Content-Type', 'audio/mpeg');
+  res.setHeader('Content-Disposition', `attachment; filename="${title}"`);
+
+  const stream = ytdl(video_id, { quality: 'highestaudio' });
+  ffmpeg(stream)
+    .audioCodec('libmp3lame')
+    .toFormat('mp3')
+    .pipe(res)
+    .on('error', error => {
+      console.error(error);
+      res.status(500).send('Error converting video to MP3.');
+    });
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
